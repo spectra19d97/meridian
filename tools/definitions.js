@@ -1111,6 +1111,98 @@ Blacklisted tokens are filtered BEFORE the LLM even sees pool candidates.`,
       }
     }
   },
+  {
+    type: "function",
+    function: {
+      name: "list_strategy_contracts",
+      description: `List the built-in Strategy Contract v0.1 definitions for Dry-Run v2 planning.
+Use this to see candidate strategy versions, shared pool types, required metrics, and safety rules.
+These are machine-readable contracts, not user-saved active strategies.`,
+      parameters: { type: "object", properties: {} }
+    }
+  },
+  {
+    type: "function",
+    function: {
+      name: "get_strategy_contract",
+      description: `Get the full machine-readable Strategy Contract v0.1 definition for one strategy.
+Use this when preparing dry-run event logging, paper strategy selection, or implementation planning.`,
+      parameters: {
+        type: "object",
+        properties: {
+          id: {
+            type: "string",
+            enum: [
+              "spot_efficiency_v1",
+              "bidask_dump_reversal_v1",
+              "strict_fee_tvl_v1",
+              "anti_killer_pool_guard_v1"
+            ],
+            description: "Strategy contract id"
+          }
+        },
+        required: ["id"]
+      }
+    }
+  },
+  {
+    type: "function",
+    function: {
+      name: "list_paper_positions",
+      description: "List local Dry-Run v2 paper positions. Read-only; does not touch wallet, RPC, SDK, or live positions.",
+      parameters: {
+        type: "object",
+        properties: {
+          status: { type: "string", enum: ["open", "closed", "invalid"], description: "Optional paper position status filter" },
+          limit: { type: "number", description: "Maximum paper positions to return. Default 50." }
+        }
+      }
+    }
+  },
+  {
+    type: "function",
+    function: {
+      name: "get_paper_position",
+      description: "Get one local Dry-Run v2 paper position by PAPER_ id. Read-only.",
+      parameters: {
+        type: "object",
+        properties: {
+          paper_id: { type: "string", description: "Paper position id, e.g. PAPER_..." }
+        },
+        required: ["paper_id"]
+      }
+    }
+  },
+  {
+    type: "function",
+    function: {
+      name: "close_paper_position",
+      description: "Record a local paper close for a PAPER_ id. Only available when DRY_RUN=true; never closes a live position.",
+      parameters: {
+        type: "object",
+        properties: {
+          paper_id: { type: "string", description: "Paper position id. Must start with PAPER_." },
+          reason: { type: "string", description: "Why the paper position is being closed." }
+        },
+        required: ["paper_id"]
+      }
+    }
+  },
+  {
+    type: "function",
+    function: {
+      name: "claim_paper_fees",
+      description: "Record a local paper fee-claim event for a PAPER_ id. Only available when DRY_RUN=true; never sends a transaction.",
+      parameters: {
+        type: "object",
+        properties: {
+          paper_id: { type: "string", description: "Paper position id. Must start with PAPER_." },
+          note: { type: "string", description: "Optional note for the paper fee claim event." }
+        },
+        required: ["paper_id"]
+      }
+    }
+  },
 ];
 
 export const tools = toolDefinitions.map((tool) => ({

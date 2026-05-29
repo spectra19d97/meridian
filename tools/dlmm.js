@@ -29,6 +29,7 @@ import { normalizeMint } from "./wallet.js";
 import { appendDecision } from "../decision-log.js";
 import { agentMeridianJson, getAgentIdForRequests, getAgentMeridianHeaders } from "./agent-meridian.js";
 import { getAndClearStagedSignals } from "../signal-tracker.js";
+import { claimPaperFees, closePaperPosition, createPaperPosition } from "../paper-trading.js";
 
 // ─── Lazy SDK loader ───────────────────────────────────────────
 // @meteora-ag/dlmm → @coral-xyz/anchor uses CJS directory imports
@@ -460,6 +461,7 @@ export async function deployPosition({
   upside_pct,
   // optional pool metadata for learning (passed by agent when available)
   pool_name,
+  base_mint,
   bin_step,
   base_fee,
   volatility,
@@ -476,6 +478,78 @@ export async function deployPosition({
 
   if (volatility != null && (normalizedVolatility == null || normalizedVolatility <= 0)) {
     throw new Error(`Invalid volatility ${volatility} — refusing deploy because the volatility feed is unusable.`);
+  }
+
+  if (process.env.DRY_RUN === "true") {
+    const finalAmountY = Number(amount_y ?? amount_sol ?? config.management.deployAmountSol);
+    const finalAmountX = Number(amount_x ?? 0);
+    if (!Number.isFinite(finalAmountY) || !Number.isFinite(finalAmountX) || finalAmountY < 0 || finalAmountX < 0) {
+      throw new Error("Invalid deploy amount: amount_x and amount_y must be valid non-negative numbers.");
+    }
+    if (finalAmountX > 0) {
+      throw new Error("Unsupported deploy amount: this agent only supports single-side SOL deploys. Use amount_y/amount_sol and keep amount_x=0.");
+    }
+    if (finalAmountY <= 0) {
+      throw new Error("Invalid deploy amount: provide a positive amount_y/amount_sol.");
+    }
+    if (Number(bins_above ?? 0) > 0 || Number(upside_pct ?? 0) > 0) {
+      throw new Error(
+        "Single-side SOL deploy cannot use bins_above or upside_pct. Use amount_y with bins_below only; the upper bin is the SDK active bin.",
+      );
+    }
+    activeBinsAbove = 0;
+    activeBinsBelow = Number(activeBinsBelow);
+    if (!Number.isFinite(activeBinsBelow) || !Number.isInteger(activeBinsBelow) || activeBinsBelow < 0) {
+      throw new Error("Invalid bin range: bins_below must be a non-negative whole-bin integer.");
+    }
+    const minBinsBelow = Math.max(MIN_SAFE_BINS_BELOW, Number(config.strategy.minBinsBelow ?? MIN_SAFE_BINS_BELOW));
+    if (activeBinsBelow < minBinsBelow) {
+      throw new Error(
+        `Invalid deploy range: bins_below ${activeBinsBelow} is below minimum ${minBinsBelow}. Refusing 1-bin/tiny-range deploy.`,
+      );
+    }
+
+    const paperPosition = createPaperPosition({
+      pool: pool_address,
+      pool_name,
+      base_mint,
+      strategy: activeStrategy,
+      amount_y: finalAmountY,
+      amount_x: finalAmountX,
+      bins_below: activeBinsBelow,
+      bins_above: activeBinsAbove,
+      entry_active_bin: null,
+      bin_step: bin_step ?? null,
+      entry_range: {
+        lower_bin: null,
+        upper_bin: null,
+        downside_pct: downside_pct ?? null,
+        upside_pct: upside_pct ?? null,
+      },
+      fee_tvl_ratio,
+      organic_score,
+      volatility: normalizedVolatility,
+      entry_reason: `DRY_RUN paper deploy ${activeStrategy} ${finalAmountY} SOL`,
+      risk_flags: [],
+      hard_filters_passed: ["dry_run_no_transaction", "paper_only_no_sdk_or_rpc"],
+    });
+    return {
+      dry_run: true,
+      position: paperPosition.paper_id,
+      paper_position: paperPosition,
+      would_deploy: {
+        pool_address,
+        strategy: activeStrategy,
+        bins_below: activeBinsBelow,
+        bins_above: activeBinsAbove,
+        downside_pct: downside_pct ?? null,
+        upside_pct: upside_pct ?? null,
+        amount_x: finalAmountX,
+        amount_y: finalAmountY,
+        wide_range: activeBinsBelow > 69,
+      },
+      message: "DRY RUN - paper position recorded; no SDK/RPC call or transaction sent",
+    };
   }
 
   if (isPoolOnCooldown(pool_address)) {
@@ -568,24 +642,6 @@ export async function deployPosition({
     throw new Error(
       `Invalid deploy range: total bins ${totalBins} is below minimum ${minBinsBelow}. Refusing 1-bin/tiny-range deploy.`,
     );
-  }
-
-  if (process.env.DRY_RUN === "true") {
-    return {
-      dry_run: true,
-      would_deploy: {
-        pool_address,
-        strategy: activeStrategy,
-        bins_below: activeBinsBelow,
-        bins_above: activeBinsAbove,
-        downside_pct: downside_pct ?? null,
-        upside_pct: upside_pct ?? null,
-        amount_x: finalAmountX,
-        amount_y: finalAmountY,
-        wide_range: totalBins > 69,
-      },
-      message: "DRY RUN — no transaction sent",
-    };
   }
 
   const isWideRange = totalBins > 69;
@@ -1458,6 +1514,15 @@ export async function searchPools({ query, limit = 10 }) {
 export async function claimFees({ position_address }) {
   position_address = normalizeMint(position_address);
   if (process.env.DRY_RUN === "true") {
+    if (String(position_address || "").startsWith("PAPER_")) {
+      const paperEvent = claimPaperFees(position_address, "DRY_RUN paper fee claim");
+      return {
+        dry_run: true,
+        would_claim: position_address,
+        paper_event: paperEvent,
+        message: "DRY RUN - paper claim recorded; no transaction sent",
+      };
+    }
     return { dry_run: true, would_claim: position_address, message: "DRY RUN — no transaction sent" };
   }
 
@@ -1504,6 +1569,17 @@ export async function claimFees({ position_address }) {
 export async function closePosition({ position_address, reason }) {
   position_address = normalizeMint(position_address);
   if (process.env.DRY_RUN === "true") {
+    if (String(position_address || "").startsWith("PAPER_")) {
+      const result = closePaperPosition(position_address, reason || "DRY_RUN paper close");
+      if (result?.error) return { dry_run: true, success: false, error: result.error };
+      return {
+        dry_run: true,
+        would_close: position_address,
+        paper_position: result.position,
+        paper_event: result.event,
+        message: "DRY RUN - paper close recorded; no transaction sent",
+      };
+    }
     return { dry_run: true, would_close: position_address, message: "DRY RUN — no transaction sent" };
   }
 

@@ -16,6 +16,19 @@ import { setPositionInstruction } from "../state.js";
 
 import { getPoolMemory, addPoolNote } from "../pool-memory.js";
 import { addStrategy, listStrategies, getStrategy, setActiveStrategy, removeStrategy } from "../strategy-library.js";
+import {
+  getStrategyContract,
+  listStrategyContracts,
+  SHARED_POOL_TYPES,
+  SHARED_REQUIRED_METRICS,
+  SHARED_SAFETY_RULES,
+} from "../strategy-contract.js";
+import {
+  claimPaperFees,
+  closePaperPosition,
+  getPaperPosition,
+  listPaperPositions,
+} from "../paper-trading.js";
 import { addToBlacklist, removeFromBlacklist, listBlacklist } from "../token-blacklist.js";
 import { blockDev, unblockDev, listBlockedDevs } from "../dev-blocklist.js";
 import { addSmartWallet, removeSmartWallet, listSmartWallets, checkSmartWalletsOnPool } from "../smart-wallets.js";
@@ -296,6 +309,47 @@ const toolMap = {
   get_strategy:        getStrategy,
   set_active_strategy: setActiveStrategy,
   remove_strategy:     removeStrategy,
+  list_strategy_contracts: () => ({
+    count: listStrategyContracts().length,
+    pool_types: SHARED_POOL_TYPES,
+    shared_required_metrics: SHARED_REQUIRED_METRICS,
+    shared_safety_rules: SHARED_SAFETY_RULES,
+    strategies: listStrategyContracts(),
+  }),
+  get_strategy_contract: ({ id }) => {
+    const contract = getStrategyContract(id);
+    if (!contract) {
+      return {
+        error: `Strategy contract "${id}" not found`,
+        available: listStrategyContracts().map((entry) => entry.id),
+      };
+    }
+    return contract;
+  },
+  list_paper_positions: ({ status, limit } = {}) => listPaperPositions({ status, limit }),
+  get_paper_position: ({ paper_id }) => {
+    const position = getPaperPosition(paper_id);
+    if (!position) return { error: `Paper position ${paper_id} not found` };
+    return { position };
+  },
+  close_paper_position: ({ paper_id, reason } = {}) => {
+    if (process.env.DRY_RUN !== "true") {
+      return { error: "close_paper_position is only available when DRY_RUN=true" };
+    }
+    if (!String(paper_id || "").startsWith("PAPER_")) {
+      return { error: "paper_id must start with PAPER_" };
+    }
+    return closePaperPosition(paper_id, reason || "paper close requested");
+  },
+  claim_paper_fees: ({ paper_id, note } = {}) => {
+    if (process.env.DRY_RUN !== "true") {
+      return { error: "claim_paper_fees is only available when DRY_RUN=true" };
+    }
+    if (!String(paper_id || "").startsWith("PAPER_")) {
+      return { error: "paper_id must start with PAPER_" };
+    }
+    return claimPaperFees(paper_id, note || "paper fee claim requested");
+  },
   get_pool_memory: getPoolMemory,
   add_pool_note: addPoolNote,
   add_to_blacklist: addToBlacklist,
@@ -663,8 +717,10 @@ export async function executeTool(name, args) {
 async function runSafetyChecks(name, args) {
   switch (name) {
     case "deploy_position": {
-      const poolThresholds = await validateDeployPoolThresholds(args);
-      if (!poolThresholds.pass) return poolThresholds;
+      if (process.env.DRY_RUN !== "true") {
+        const poolThresholds = await validateDeployPoolThresholds(args);
+        if (!poolThresholds.pass) return poolThresholds;
+      }
 
       // Reject pools with bin_step out of configured range
       const minStep = config.screening.minBinStep;
@@ -736,33 +792,35 @@ async function runSafetyChecks(name, args) {
       }
 
       // Check position count limit + duplicate pool guard — force fresh scan to avoid stale cache
-      const positions = await getMyPositions({ force: true });
-      if (positions.total_positions >= config.risk.maxPositions) {
-        return {
-          pass: false,
-          reason: `Max positions (${config.risk.maxPositions}) reached. Close a position first.`,
-        };
-      }
-      const alreadyInPool = positions.positions.some(
-        (p) => p.pool === args.pool_address
-      );
-      if (alreadyInPool) {
-        return {
-          pass: false,
-          reason: `Already have an open position in pool ${args.pool_address}. Cannot open duplicate.`,
-        };
-      }
-
-      // Block same base token across different pools
-      if (args.base_mint) {
-        const alreadyHasMint = positions.positions.some(
-          (p) => p.base_mint === args.base_mint
-        );
-        if (alreadyHasMint) {
+      if (process.env.DRY_RUN !== "true") {
+        const positions = await getMyPositions({ force: true });
+        if (positions.total_positions >= config.risk.maxPositions) {
           return {
             pass: false,
-            reason: `Already holding base token ${args.base_mint} in another pool. One position per token only.`,
+            reason: `Max positions (${config.risk.maxPositions}) reached. Close a position first.`,
           };
+        }
+        const alreadyInPool = positions.positions.some(
+          (p) => p.pool === args.pool_address
+        );
+        if (alreadyInPool) {
+          return {
+            pass: false,
+            reason: `Already have an open position in pool ${args.pool_address}. Cannot open duplicate.`,
+          };
+        }
+
+        // Block same base token across different pools
+        if (args.base_mint) {
+          const alreadyHasMint = positions.positions.some(
+            (p) => p.base_mint === args.base_mint
+          );
+          if (alreadyHasMint) {
+            return {
+              pass: false,
+              reason: `Already holding base token ${args.base_mint} in another pool. One position per token only.`,
+            };
+          }
         }
       }
 

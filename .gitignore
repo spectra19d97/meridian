@@ -20,6 +20,8 @@ strategy-library.json
 decision-log.json
 hivemind-cache.json
 signal-weights.json
+paper-positions.json
+paper-events.jsonl
 
 # Logs
 logs/
