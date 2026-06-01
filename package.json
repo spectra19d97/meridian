@@ -18,6 +18,7 @@
     "paper:report": "node scripts/paper-report.js",
     "paper:fixture": "node scripts/create-paper-fixture.js",
     "paper:dashboard": "node scripts/paper-dashboard.js",
+    "paper:learn": "node scripts/paper-learn.js",
     "test": "npm run test:syntax",
     "test:syntax": "find . -path ./node_modules -prune -o -name '*.js' -exec node --check {} \\;",
     "test:screen": "node test/test-screening.js",
