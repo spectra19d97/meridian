@@ -12,6 +12,9 @@ const EVENT_TYPES = new Set([
   "paper_claim",
   "paper_close",
   "paper_anomaly",
+  "paper_snapshot",
+  "paper_valuation",
+  "paper_simulator_warning",
 ]);
 
 const SENSITIVE_FIELD_PATTERN = /(private|secret|seed|mnemonic|wallet.*key|api.*key|apikey|token|bearer|authorization|auth|password|rpc)/i;
@@ -136,6 +139,7 @@ function eventCount(events, type) {
 function anomalyCount(events, malformed) {
   return malformed + events.filter((event) => (
     event.type === "paper_anomaly" ||
+    event.type === "paper_simulator_warning" ||
     event.type === "paper_reject" ||
     event._unknown_type
   )).length;

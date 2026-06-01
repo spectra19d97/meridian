@@ -86,6 +86,9 @@ fs.writeFileSync(eventsFile, [
   JSON.stringify({ event_id: "pevt_close", ts: "2026-05-30T01:30:00.000Z", type: "paper_close", paper_id: "PAPER_closed", strategy: "bidask_dump_reversal_v1", pool_name: "CLOSED-SOL", reason: "close test" }),
   JSON.stringify({ event_id: "pevt_reject", ts: "2026-05-30T02:00:00.000Z", type: "paper_reject", paper_id: null, strategy_version: null, pool_name: "REJECTED-SOL", reason: "reject test" }),
   JSON.stringify({ event_id: "pevt_anomaly", ts: "2026-05-30T02:05:00.000Z", type: "paper_anomaly", paper_id: "PAPER_open", strategy_version: "spot_efficiency_v1", pool_name: "SAFE-SOL", reason: "anomaly test" }),
+  JSON.stringify({ event_id: "pevt_snapshot", ts: "2026-05-30T02:06:00.000Z", type: "paper_snapshot", paper_id: "PAPER_open", strategy_version: "spot_efficiency_v1", pool_name: "SAFE-SOL", reason: "snapshot test" }),
+  JSON.stringify({ event_id: "pevt_valuation", ts: "2026-05-30T02:07:00.000Z", type: "paper_valuation", paper_id: "PAPER_open", strategy_version: "spot_efficiency_v1", pool_name: "SAFE-SOL", reason: "valuation test" }),
+  JSON.stringify({ event_id: "pevt_sim_warning", ts: "2026-05-30T02:08:00.000Z", type: "paper_simulator_warning", paper_id: "PAPER_open", strategy_version: "spot_efficiency_v1", pool_name: "SAFE-SOL", reason: "simulator warning test" }),
   JSON.stringify({ event_id: "pevt_unknown", ts: "2026-05-30T02:10:00.000Z", type: "unexpected_event", paper_id: "PAPER_open", strategy_version: "spot_efficiency_v1", pool_name: "SAFE-SOL", reason: "unknown test" }),
   "{ malformed jsonl line",
 ].join("\n"));
@@ -99,13 +102,16 @@ assert.match(output, /Closed: 1/);
 assert.match(output, /Deploy events: 1/);
 assert.match(output, /Claim events: 1/);
 assert.match(output, /Close events: 1/);
-assert.match(output, /Anomaly\/reject\/error events: 4/);
+assert.match(output, /Anomaly\/reject\/error events: 5/);
 assert.match(output, /spot_efficiency_v1: 1/);
 assert.match(output, /bidask_dump_reversal_v1: 1/);
 assert.match(output, /SAFE-SOL: 1/);
 assert.match(output, /CLOSED-SOL: 1/);
 assert.match(output, /PAPER_open \| SAFE-SOL \| spot_efficiency_v1 \| 0.5/);
 assert.match(output, /PAPER_closed \| CLOSED-SOL \| bidask_dump_reversal_v1 \| close test/);
+assert.match(output, /paper_snapshot \| PAPER_open \| SAFE-SOL \| spot_efficiency_v1 \| snapshot test/);
+assert.match(output, /paper_valuation \| PAPER_open \| SAFE-SOL \| spot_efficiency_v1 \| valuation test/);
+assert.match(output, /paper_simulator_warning \| PAPER_open \| SAFE-SOL \| spot_efficiency_v1 \| simulator warning test/);
 assert.match(output, /\[REDACTED/);
 assert.equal(output.includes("4Nd1mZ"), false);
 
