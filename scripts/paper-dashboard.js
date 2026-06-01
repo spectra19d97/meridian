@@ -6,6 +6,7 @@ import process from "process";
 const POSITIONS_FILE = process.env.PAPER_POSITIONS_FILE || "./paper-positions.json";
 const EVENTS_FILE = process.env.PAPER_EVENTS_FILE || "./paper-events.jsonl";
 const DASHBOARD_FILE = process.env.DASHBOARD_FILE || path.join(os.tmpdir(), "meridian-paper-dashboard", "index.html");
+const LEARNING_FILE = process.env.LEARNING_FILE || path.join(os.tmpdir(), "meridian-paper-learning", "learning-summary.json");
 
 const EVENT_TYPES = new Set([
   "paper_deploy",
@@ -106,6 +107,40 @@ function readEvents(filePath) {
     }
   }
   return { path: resolved, status: "ok", events, malformed, warning: malformed ? `${malformed} malformed line(s)` : null };
+}
+
+function readLearningSummary(filePath) {
+  const resolved = path.resolve(filePath);
+  if (!fs.existsSync(resolved)) {
+    return { path: resolved, status: "missing", summary: {}, records: [], warning: "Learning summary: missing" };
+  }
+  try {
+    const parsed = sanitize(JSON.parse(fs.readFileSync(resolved, "utf8")));
+    const records = Array.isArray(parsed?.records) ? parsed.records.filter(isObject).map((record) => ({
+      paper_id: record.paper_id || null,
+      pool_name: record.pool_name || null,
+      current_review_label: record.current_review_label || "Unknown",
+      review_reasons: Array.isArray(record.review_reasons) ? record.review_reasons : [],
+      learning_flags: Array.isArray(record.learning_flags) ? record.learning_flags : [],
+      snapshot_count: record.snapshot_count ?? 0,
+      warning_count: record.warning_count ?? 0,
+      stale_count: record.stale_count ?? 0,
+      low_confidence_count: record.low_confidence_count ?? 0,
+      invalid_data_count: record.invalid_data_count ?? 0,
+      out_of_range_observation_count: record.out_of_range_observation_count ?? 0,
+      synthetic_fixture_detected: !!record.synthetic_fixture_detected,
+      notes: Array.isArray(record.notes) ? record.notes : [],
+    })) : [];
+    return {
+      path: resolved,
+      status: "ok",
+      summary: isObject(parsed?.summary) ? parsed.summary : {},
+      records,
+      warning: null,
+    };
+  } catch (error) {
+    return { path: resolved, status: "parse_error", summary: {}, records: [], warning: `Learning file unreadable: ${sanitize(error.message)}` };
+  }
 }
 
 function countBy(items, keyFn) {
@@ -334,6 +369,33 @@ function listTable(entries) {
   return table(["Name", "Count"], entries.map(([name, count]) => [name, count]));
 }
 
+function learningLabelCounts(records) {
+  const counts = new Map();
+  for (const record of records) {
+    increment(counts, record.current_review_label || "Unknown");
+  }
+  return [...counts.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+}
+
+function learningNeedsReview(record) {
+  return record.current_review_label !== "Data Healthy" || record.review_reasons.length > 0;
+}
+
+function learningNoteRows(records, limit = 10) {
+  const rows = [];
+  for (const record of records) {
+    for (const note of record.notes) {
+      rows.push([
+        label(record.paper_id, "no-paper-id"),
+        label(record.pool_name),
+        label(record.current_review_label),
+        label(note, "no learning note"),
+      ]);
+    }
+  }
+  return rows.slice(0, limit);
+}
+
 function eventNote(event) {
   const note = label(event.summary || event.reason, "no local event note");
   return note.length > 120 ? `${note.slice(0, 117)}...` : note;
@@ -342,14 +404,17 @@ function eventNote(event) {
 function renderDashboard() {
   const positionsResult = readPositions(POSITIONS_FILE);
   const eventsResult = readEvents(EVENTS_FILE);
+  const learningResult = readLearningSummary(LEARNING_FILE);
   const positions = positionsResult.positions;
   const events = eventsResult.events;
+  const learningRecords = learningResult.records;
   const openPositions = positions.filter((position) => position.status === "open");
   const closedPositions = positions.filter((position) => position.status === "closed");
   const strategyUsage = countBy(positions, strategyLabel);
   const poolUsage = countBy(positions, (position) => label(position.pool_name || position.pool));
   const quality = analyzeSimulatorQuality(positions, events);
-  const fixtureDetected = syntheticFixtureDetected(positions, events);
+  const fixtureDetected = syntheticFixtureDetected(positions, events) ||
+    learningRecords.some((record) => record.synthetic_fixture_detected);
 
   const summaryCards = [
     ["Total positions", positions.length],
@@ -369,6 +434,16 @@ function renderDashboard() {
     ["Low Confidence", quality.counts.lowConfidence],
     ["Insufficient Data", quality.counts.insufficientData],
     ["Needs Review", quality.counts.needsReview],
+  ];
+  const learningSummaryCards = [
+    ["Learning status", learningResult.status],
+    ["Learning records", learningRecords.length],
+    ["Data Healthy", learningRecords.filter((record) => record.current_review_label === "Data Healthy").length],
+    ["Needs Review", learningRecords.filter((record) => learningNeedsReview(record)).length],
+    ["Warning Cluster", learningRecords.filter((record) => record.current_review_label === "Warning Cluster").length],
+    ["Stale Data", learningRecords.filter((record) => record.current_review_label === "Stale Data").length],
+    ["Low Confidence", learningRecords.filter((record) => record.current_review_label === "Low Confidence").length],
+    ["Insufficient Data", learningRecords.filter((record) => record.current_review_label === "Insufficient Data").length],
   ];
 
   const reviewRows = quality.rows
@@ -405,6 +480,41 @@ function renderDashboard() {
     strategyLabel(event),
     `raw local event note: ${eventNote(event)}`,
   ]);
+  const learningReviewRows = learningRecords
+    .filter(learningNeedsReview)
+    .map((record) => [
+      label(record.paper_id, "no-paper-id"),
+      label(record.pool_name),
+      label(record.current_review_label),
+      label(record.review_reasons.join(", "), "review"),
+      label(record.learning_flags.join(", "), "none"),
+    ]);
+  const warningClusterRows = learningRecords
+    .filter((record) => record.current_review_label === "Warning Cluster")
+    .map((record) => [
+      label(record.paper_id, "no-paper-id"),
+      label(record.pool_name),
+      label(record.warning_count, "0"),
+      label(record.review_reasons.join(", "), "repeated warnings"),
+    ]);
+  const learningRecordRows = learningRecords.map((record) => [
+    label(record.paper_id, "no-paper-id"),
+    label(record.pool_name),
+    label(record.current_review_label),
+    label(record.review_reasons.join(", "), "none"),
+    label(record.learning_flags.join(", "), "none"),
+    label(record.snapshot_count, "0"),
+    label(record.warning_count, "0"),
+    label(record.stale_count, "0"),
+    label(record.low_confidence_count, "0"),
+    label(record.invalid_data_count, "0"),
+    label(record.out_of_range_observation_count, "0"),
+    record.synthetic_fixture_detected ? "true" : "false",
+    label(record.notes.join(" | "), "none"),
+  ]);
+  const learningStatusText = learningResult.warning
+    ? `<p>${escapeHtml(label(learningResult.warning))}</p>`
+    : "<p>Local paper data only. Data-health view only. Not trading advice.</p>";
 
   return `<!doctype html>
 <html lang="en">
@@ -443,22 +553,43 @@ function renderDashboard() {
       <h2>Data Source Paths</h2>
       <p>Positions: <code>${escapeHtml(label(positionsResult.path))}</code> (${escapeHtml(positionsResult.status)})</p>
       <p>Events: <code>${escapeHtml(label(eventsResult.path))}</code> (${escapeHtml(eventsResult.status)})</p>
+      <p>Learning: <code>${escapeHtml(label(learningResult.path))}</code> (${escapeHtml(learningResult.status)})</p>
       <p>Dashboard: <code>${escapeHtml(path.resolve(DASHBOARD_FILE))}</code></p>
       ${positionsResult.warning ? `<p>Positions warning: ${escapeHtml(label(positionsResult.warning))}</p>` : ""}
       ${eventsResult.warning ? `<p>Events warning: ${escapeHtml(label(eventsResult.warning))}</p>` : ""}
+      ${learningResult.warning ? `<p>${escapeHtml(label(learningResult.warning))}</p>` : ""}
     </section>
     <section><h2>Summary</h2>${countCards(summaryCards)}</section>
     <section><h2>Simulator Snapshot Quality</h2>${countCards(qualityCards)}</section>
+    <section><h2>Learning Summary</h2>${learningStatusText}${countCards(learningSummaryCards)}</section>
+    <section><h2>Learning Labels</h2>${listTable(learningLabelCounts(learningRecords))}</section>
+    <section>
+      <h2>Learning Label Guide</h2>
+      ${table(["Label", "Meaning"], [
+        ["Data Healthy", "local data looks complete enough for review only"],
+        ["Needs Review", "do not trust this paper record yet"],
+        ["Warning Cluster", "repeated warnings were recorded"],
+        ["Stale Data", "local snapshot is old"],
+        ["Low Confidence", "source or confidence quality is weak"],
+        ["Insufficient Data", "not enough local events exist yet"],
+        ["Invalid Data", "local event data is malformed or invalid"],
+        ["Out Of Range", "recorded range_state explicitly says out_of_range"],
+      ])}
+    </section>
     <section class="grid">
       <div><h2>Strategy Usage</h2>${listTable(strategyUsage)}</div>
       <div><h2>Pool Usage</h2>${listTable(poolUsage)}</div>
       <div><h2>Data Source Distribution</h2>${listTable([...quality.sources.entries()])}</div>
       <div><h2>Confidence Distribution</h2>${listTable([...quality.confidence.entries()])}</div>
     </section>
+    <section><h2>Review Priority</h2>${table(["Paper ID", "Pool", "Label", "Reasons", "Flags"], learningReviewRows)}</section>
+    <section><h2>Warning Clusters</h2>${table(["Paper ID", "Pool", "Warnings", "Reasons"], warningClusterRows)}</section>
+    <section><h2>Latest Learning Notes</h2>${table(["Paper ID", "Pool", "Label", "Note"], learningNoteRows(learningRecords))}</section>
     <section><h2>Positions Needing Review</h2>${table(["Paper ID", "Pool", "Strategy", "Label", "Reasons"], reviewRows)}</section>
     <section><h2>Open Positions</h2>${table(["Paper ID", "Pool", "Strategy", "Created At", "Last Event"], openRows)}</section>
     <section><h2>Snapshot Completeness by Paper Position</h2>${table(["Paper ID", "Pool", "Latest Snapshot", "Label", "Needs Review", "Missing"], completenessRows)}</section>
     <section><h2>Latest Simulator Warnings</h2>${table(["Timestamp", "Paper ID", "Pool", "Severity", "Code", "Raw Local Event Note"], warningRows)}</section>
+    <section><h2>Learning Records</h2>${table(["Paper ID", "Pool", "Label", "Reasons", "Flags", "Snapshots", "Warnings", "Stale", "Low Confidence", "Invalid", "Out Of Range", "Synthetic", "Notes"], learningRecordRows)}</section>
     <section><h2>Latest Paper Events</h2>${table(["Timestamp", "Type", "Paper ID", "Pool", "Strategy", "Raw Local Event Note"], latestRows)}</section>
   </main>
   <footer>Manual local dashboard. Rerun paper:dashboard to refresh. Do not use this as trading evidence.</footer>
