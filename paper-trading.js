@@ -8,6 +8,7 @@
 import crypto from "crypto";
 import fs from "fs";
 
+import { normalizeSimulatorSnapshot, validateSimulatorSnapshot } from "./paper-simulator-schema.js";
 import { getStrategyContract } from "./strategy-contract.js";
 
 const PAPER_POSITIONS_FILE = process.env.PAPER_POSITIONS_FILE || "./paper-positions.json";
@@ -20,7 +21,12 @@ const EVENT_TYPES = new Set([
   "paper_claim",
   "paper_close",
   "paper_anomaly",
+  "paper_snapshot",
+  "paper_valuation",
+  "paper_simulator_warning",
 ]);
+
+const SIMULATOR_WARNING_SEVERITIES = new Set(["unknown", "low", "medium", "high"]);
 
 const SHAPE_TO_CONTRACT = {
   spot: "spot_efficiency_v1",
@@ -89,6 +95,22 @@ function listOrEmpty(value) {
   return Array.isArray(value) ? value : [];
 }
 
+function objectOrEmpty(value) {
+  return value && typeof value === "object" && !Array.isArray(value) ? value : {};
+}
+
+function severityOrUnknown(value) {
+  if (typeof value !== "string") return "unknown";
+  const normalized = value.trim().toLowerCase();
+  return SIMULATOR_WARNING_SEVERITIES.has(normalized) ? normalized : "unknown";
+}
+
+function textOrDefault(value, fallback) {
+  if (typeof value !== "string") return fallback;
+  const trimmed = value.trim();
+  return trimmed || fallback;
+}
+
 function strategyVersionFor(input) {
   const explicit = input.strategy_version || input.strategy_contract_id;
   if (explicit) return explicit;
@@ -122,6 +144,9 @@ export function appendPaperEvent(event) {
     soft_signals_used: listOrEmpty(sanitized.soft_signals_used),
     metrics_snapshot: sanitized.metrics_snapshot || {},
     strategy_contract_fields: sanitized.strategy_contract_fields || {},
+    simulator_snapshot: sanitized.simulator_snapshot || null,
+    simulator_warning: sanitized.simulator_warning || null,
+    validation: sanitized.validation || null,
     human_review_needed: !!sanitized.human_review_needed,
   };
   fs.appendFileSync(PAPER_EVENTS_FILE, `${JSON.stringify(record)}\n`);
@@ -258,4 +283,109 @@ export function claimPaperFees(paperId, note = "paper claim") {
     reason: note,
     strategy_contract_fields: position.strategy_contract_fields,
   });
+}
+
+function paperPositionForRecorder(paperId) {
+  if (!paperId || !String(paperId).startsWith("PAPER_")) {
+    return { error: "paper_id must start with PAPER_" };
+  }
+  const position = getPaperPosition(paperId);
+  if (!position) return { error: `Paper position ${paperId} not found` };
+  return { position };
+}
+
+function validationWithRecorderWarnings(validation, snapshot) {
+  const warnings = [...listOrEmpty(validation?.warnings)];
+  if (snapshot?.confidence_level === "low" || snapshot?.confidence_level === "unknown") {
+    warnings.push(`snapshot confidence is ${snapshot.confidence_level}`);
+  }
+  return {
+    valid: !!validation?.valid,
+    errors: listOrEmpty(validation?.errors),
+    warnings,
+  };
+}
+
+function appendSimulatorSnapshotEvent({ paperId, snapshotInput, note, type, summary }) {
+  const lookup = paperPositionForRecorder(paperId);
+  if (lookup.error) return lookup;
+
+  const validation = validateSimulatorSnapshot(snapshotInput);
+  if (!validation.valid) {
+    return { error: "simulator snapshot validation failed", validation };
+  }
+
+  const snapshot = normalizeSimulatorSnapshot(snapshotInput);
+  const eventValidation = validationWithRecorderWarnings(validation, snapshot);
+  const position = lookup.position;
+
+  const event = appendPaperEvent({
+    type,
+    paper_id: paperId,
+    strategy_version: position.strategy_version,
+    pool: position.pool,
+    pool_name: position.pool_name,
+    summary,
+    reason: note,
+    simulator_snapshot: snapshot,
+    validation: eventValidation,
+    strategy_contract_fields: position.strategy_contract_fields,
+    human_review_needed: eventValidation.warnings.length > 0,
+  });
+
+  return { event, validation: eventValidation };
+}
+
+export function appendPaperSnapshotEvent(paperId, snapshotInput = {}, note = "") {
+  return appendSimulatorSnapshotEvent({
+    paperId,
+    snapshotInput,
+    note,
+    type: "paper_snapshot",
+    summary: "Paper simulator snapshot recorded from provided input",
+  });
+}
+
+export function appendPaperValuationEvent(paperId, snapshotInput = {}, note = "") {
+  return appendSimulatorSnapshotEvent({
+    paperId,
+    snapshotInput,
+    note,
+    type: "paper_valuation",
+    summary: "Paper valuation snapshot recorded from provided input",
+  });
+}
+
+export function appendPaperSimulatorWarning(paperId, warningInput = {}) {
+  const lookup = paperPositionForRecorder(paperId);
+  if (lookup.error) return lookup;
+
+  const source = objectOrEmpty(sanitizePaperPayload(warningInput));
+  const simulatorWarning = {
+    severity: severityOrUnknown(source.severity),
+    code: textOrDefault(source.code, "unknown"),
+    details: objectOrEmpty(source.details),
+  };
+  const reason = textOrDefault(source.reason || source.message, "paper simulator warning");
+  const position = lookup.position;
+
+  const event = appendPaperEvent({
+    type: "paper_simulator_warning",
+    paper_id: paperId,
+    strategy_version: position.strategy_version,
+    pool: position.pool,
+    pool_name: position.pool_name,
+    summary: "Paper simulator warning recorded",
+    reason,
+    simulator_warning: simulatorWarning,
+    validation: {
+      valid: true,
+      errors: [],
+      warnings: [],
+    },
+    strategy_contract_fields: position.strategy_contract_fields,
+    human_review_needed: true,
+  });
+
+  return { event };
 }
