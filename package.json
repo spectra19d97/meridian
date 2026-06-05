@@ -20,6 +20,7 @@
     "paper:dashboard": "node scripts/paper-dashboard.js",
     "paper:learn": "node scripts/paper-learn.js",
     "paper:collect:mock": "node scripts/paper-collector-mock.js",
+    "paper:collect:readonly": "node scripts/paper-collector-readonly.js",
     "test": "npm run test:syntax",
     "test:syntax": "find . -path ./node_modules -prune -o -name '*.js' -exec node --check {} \\;",
     "test:screen": "node test/test-screening.js",
